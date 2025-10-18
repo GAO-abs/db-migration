@@ -1,23 +1,39 @@
 #!/bin/bash
-set -e
 
-# PostgreSQL Database Migration Script
+# ========================================
+# PostgreSQL Database Migration Script (database_dump)
 # AWS → Huawei Cloud
-# Author: George Ajay
+# ========================================
+
+# Exit immediately if any command fails
+set -e
 
 # ====== CONFIGURATION ======
 SRC_HOST="your-aws-endpoint.amazonaws.com"
 SRC_PORT=5432
 SRC_USER="postgres"
-SRC_DB="georgedb"
+SRC_DB="src-db-name"
 
 DST_HOST="your-huawei-db-host"
 DST_PORT=5432
 DST_USER="postgres"
-DST_DB="georgedb"
+DST_DB="dest-db-name"
 
-BACKUP_FILE="georgedb_backup_$(date +%F_%H%M%S).dump"
+BACKUP_FILE="${SRC_DB}_backup_$(TZ='Africa/Lagos' date +%F_%H%M%S).dump"
 LOCAL_BACKUP_DIR="/tmp"
+LOG_FILE="$LOCAL_BACKUP_DIR/migration_$(TZ='Africa/Lagos' date +%F_%H%M%S).log"
+
+# ====== LOGGING FUNCTION ======
+log() {
+  echo "$(TZ='Africa/Lagos' date '+%Y-%m-%d %H:%M:%S') | $1" | tee -a "$LOG_FILE"
+}
+
+# ====== ERROR HANDLER ======
+error_exit() {
+  log "❌ ERROR: $1"
+  log "Migration failed. Check log: $LOG_FILE"
+  exit 1
+}
 
 # ====== STEP 0: Prompt for Passwords ======
 echo "🔐 Enter AWS PostgreSQL password:"
@@ -26,9 +42,11 @@ echo "🔐 Enter Huawei PostgreSQL password:"
 read -s DST_PASSWORD
 echo
 
-# ====== STEP 1: Perform pg_dump from AWS RDS ======
-echo "📦 Starting PostgreSQL backup from AWS (within VPC, no SSL needed)..."
-PGPASSWORD="$SRC_PASSWORD" pg_dump \
+log "🚀 Starting database migration from AWS → Huawei Cloud"
+
+# ====== STEP 1: Perform pg_dump from AWS ======
+log "📦 Starting PostgreSQL backup from AWS (within VPC, no SSL needed)..."
+if ! PGPASSWORD="$SRC_PASSWORD" pg_dump \
   -h "$SRC_HOST" \
   -p "$SRC_PORT" \
   -U "$SRC_USER" \
@@ -36,29 +54,26 @@ PGPASSWORD="$SRC_PASSWORD" pg_dump \
   --format=custom \
   --blobs \
   --verbose \
-  -f "$LOCAL_BACKUP_DIR/$BACKUP_FILE"
+  -f "$LOCAL_BACKUP_DIR/$BACKUP_FILE" >>"$LOG_FILE" 2>&1; then
+  error_exit "pg_dump failed."
+fi
+log "✅ Backup completed: $LOCAL_BACKUP_DIR/$BACKUP_FILE"
 
-echo "✅ Backup completed: $LOCAL_BACKUP_DIR/$BACKUP_FILE"
-
-# ====== STEP 2: Create destination database (if not exists) ======
-echo "🛠️  Creating destination database (if not exists, using SSL)..."
-PGPASSWORD="$DST_PASSWORD" createdb \
-  -h "$DST_HOST" \
-  -p "$DST_PORT" \
-  -U "$DST_USER" \
-  --sslmode=require \
-  "$DST_DB" 2>/dev/null || echo "Database already exists."
-
-# ====== STEP 3: Restore dump into Huawei Cloud DB ======
-echo "🔄 Restoring backup into Huawei Cloud PostgreSQL (encrypted in transit)..."
+# ====== STEP 2: Restore dump into Huawei Cloud DB ======
+log "🔄 Restoring backup into Huawei Cloud PostgreSQL (encrypted in transit)..."
+set +e
 PGPASSWORD="$DST_PASSWORD" pg_restore \
-  -h "$DST_HOST" \
-  -p "$DST_PORT" \
-  -U "$DST_USER" \
-  -d "$DST_DB" \
-  --sslmode=require \
+  --dbname="postgresql://$DST_USER:$DST_PASSWORD@$DST_HOST:$DST_PORT/$DST_DB?sslmode=require" \
   --jobs=4 \
   --verbose \
-  "$LOCAL_BACKUP_DIR/$BACKUP_FILE"
+  --no-owner --no-privileges \
+  "$LOCAL_BACKUP_DIR/$BACKUP_FILE" >>"$LOG_FILE" 2>&1
+RESTORE_STATUS=$?
+set -e
 
-echo "🎉 Migration completed successfully over SSL/TLS!"
+if [ $RESTORE_STATUS -ne 0 ]; then
+  error_exit "pg_restore encountered some errors."
+fi
+
+log "🎉 Migration completed successfully!"
+log "🗂️ Log file saved at: $LOG_FILE"
