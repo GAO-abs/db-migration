@@ -1,1 +1,1 @@
-# db-migration-dump
+# db-migration-using-pgdump
